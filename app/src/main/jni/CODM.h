@@ -1,444 +1,371 @@
+#pragma once
 #include "Includes.h"
 #include "Tools.h"
 #include "Engine/Canvas.h"
-#include "fake_dlfcn.h"
-#include "Il2Cpp.h"
-#include "Vector2.hpp"
+#include "Il2CppType.h"
+#include "Substrate/CydiaSubstrate.h"
 #include "Vector3.hpp"
+#include "Vector2.hpp"
 #include "Quaternion.hpp"
-//extern void StartRuntimeHook(const char *);
-// ================================================================================================================================ //
-#define SLEEP_TIME 1000LL / 120LL
 
-std::map<std::string, u_long> Config;
+// ================================================================
+// CODM Garena Mod Menu
+// Fresh Dump: 25 July 2026
+// Method: Direct RVA (no runtime reflection - libunity.so is stripped)
+// ================================================================
 
-int g_screenWidth = 0, g_screenHeight = 0;
-bool bInitDone = false;
-int screenWidth = 0, screenHeight = 0;
-uintptr_t g_il2cpp;
-// ================================================================================================================================ //
-std::map<std::string, uintptr_t> Fields;
-std::map<std::string, uintptr_t> Methods;
+// ================================================================
+// DIRECT RVA OFFSETS FROM DUMP.CS (25/07/2026)
+// All offsets relative to libunity.so base address
+// ================================================================
+// -- Methods --
+#define RVA_Camera_get_main           0x4E09834
+#define RVA_Camera_WorldToScreen      0x4E09378
+#define RVA_Transform_get_position    0x4E63820
+#define RVA_BRGamePlay_get_LocalPawn  0x5B671AC
+#define RVA_GamePlay_get_Game         0xC3FE434
+#define RVA_BaseGame_GetEnemyPawns    0x73B8D9C
+#define RVA_BaseGame_GetAllPawns      0x73B2960
+#define RVA_Pawn_SetAimRotation       0x4FAE5DC
 
+// -- Field Offsets --
+#define OFFSET_Pawn_m_HeadBone                    0x308
+#define OFFSET_Pawn_m_IsAlive                     0x548
+#define OFFSET_Pawn_m_PlayerInfo                  0x5C0
+#define OFFSET_Pawn_m_Mesh                        0x628
+#define OFFSET_AttackableTarget_m_AttackableInfo  0x18
+#define OFFSET_AttackableTargetInfo_m_Health      0x34
+#define OFFSET_AttackableTargetInfo_m_MaxHealth   0x38
+#define OFFSET_PlayerInfo_m_NickName              0x158
 
-// ================================================================================================================================ //
-class Transform {
-public:
+// ================================================================
+// TYPES
+// ================================================================
+template<typename T>
+using List = Il2CppList<T>;
+
+typedef Il2CppString String;
+
+struct Transform {
     Vector3 get_position() {
-        auto Transform_get_position = (Vector3 (*)(Transform *)) (Methods["Transform::get_position"]);
-        return Transform_get_position(this);
+        auto fn = (Vector3(*)(Transform*))(g_il2cpp + RVA_Transform_get_position);
+        return fn(this);
     }
 };
 
-class Component {
-public:
-    Transform *get_transform() {
-        auto Component_get_transform = (Transform *(*)(Component *)) (Methods["Component::get_transform"]);
-        return Component_get_transform(this);
+struct Camera {
+    static Camera* get_main() {
+        auto fn = (Camera*(*)())(g_il2cpp + RVA_Camera_get_main);
+        return fn();
+    }
+    Vector3 WorldToScreenPoint(Vector3 pos) {
+        auto fn = (Vector3(*)(Camera*, Vector3))(g_il2cpp + RVA_Camera_WorldToScreen);
+        return fn(this, pos);
     }
 };
 
-class Camera {
-public:
-    static Camera *get_main() {
-        auto Camera_get_main = (Camera *(*)()) (Methods["Camera::get_main"]);
-        return Camera_get_main();
-    }
-};
+// ================================================================
+// GLOBALS
+// ================================================================
+uintptr_t g_il2cpp = 0;
+int g_screenWidth = 0;
+int g_screenHeight = 0;
+bool bInitDone = false;
+std::map<std::string, uintptr_t> Config;
 
+// ================================================================
+// HELPER: GET METHOD PTR FROM RVA
+// ================================================================
+#define METHOD(rva) (g_il2cpp + (rva))
+
+// ================================================================
+// WORLDTOSCREEN
+// ================================================================
 Vector3 WorldToScreen(Vector3 pos) {
-    auto main = Camera::get_main();
-    if (main) {
-        auto Camera_WorldToScreenPoint = (Vector3 (*)(Camera *, Vector3)) (Methods["Camera::WorldToScreenPoint"]);
-        return Camera_WorldToScreenPoint(main, pos);
+    auto cam = Camera::get_main();
+    if (cam) {
+        return cam->WorldToScreenPoint(pos);
     }
     return {0, 0, 0};
 }
 
+// ================================================================
+// GET LOCAL PAWN
+// ================================================================
+uintptr_t GetLocalPawn() {
+    auto fn = (uintptr_t(*)())(METHOD(RVA_BRGamePlay_get_LocalPawn));
+    return fn();
+}
+
+// ================================================================
+// GET BASE GAME
+// ================================================================
+uintptr_t GetBaseGame() {
+    auto fn = (uintptr_t(*)())(METHOD(RVA_GamePlay_get_Game));
+    return fn();
+}
+
+// ================================================================
+// GET ENEMY PAWNS
+// ================================================================
+List<uintptr_t>* GetEnemyPawns() {
+    auto baseGame = GetBaseGame();
+    if (!baseGame) return nullptr;
+    auto fn = (List<uintptr_t>*(*)(uintptr_t))(METHOD(RVA_BaseGame_GetEnemyPawns));
+    return fn(baseGame);
+}
+
+// ================================================================
+// GET PAWN INFO
+// ================================================================
+bool IsPawnAlive(uintptr_t pawn) {
+    if (!pawn) return false;
+    return *(bool*)(pawn + OFFSET_Pawn_m_IsAlive);
+}
+
+Transform* GetPawnMesh(uintptr_t pawn) {
+    if (!pawn) return nullptr;
+    return *(Transform**)(pawn + OFFSET_Pawn_m_Mesh);
+}
+
+Transform* GetPawnHeadBone(uintptr_t pawn) {
+    if (!pawn) return nullptr;
+    return *(Transform**)(pawn + OFFSET_Pawn_m_HeadBone);
+}
+
+float GetPawnHealth(uintptr_t pawn) {
+    if (!pawn) return 0;
+    auto attackableTarget = *(uintptr_t*)(pawn + OFFSET_AttackableTarget_m_AttackableInfo);
+    if (!attackableTarget) return 0;
+    return *(float*)(attackableTarget + OFFSET_AttackableTargetInfo_m_Health);
+}
+
+float GetPawnMaxHealth(uintptr_t pawn) {
+    if (!pawn) return 100;
+    auto attackableTarget = *(uintptr_t*)(pawn + OFFSET_AttackableTarget_m_AttackableInfo);
+    if (!attackableTarget) return 100;
+    return *(float*)(attackableTarget + OFFSET_AttackableTargetInfo_m_MaxHealth);
+}
+
+std::string GetPawnName(uintptr_t pawn) {
+    if (!pawn) return "Unknown";
+    auto playerInfo = *(uintptr_t*)(pawn + OFFSET_Pawn_m_PlayerInfo);
+    if (!playerInfo) return "Unknown";
+    auto nameStr = *(String**)(playerInfo + OFFSET_PlayerInfo_m_NickName);
+    if (!nameStr) return "Unknown";
+    return nameStr->ToString();
+}
+
+// ================================================================
+// AIMBOT
+// ================================================================
+bool isInsideFOV(int x, int y) {
+    if (!Config["AIM::SIZE"]) return true;
+    int cx = g_screenWidth / 2, cy = g_screenHeight / 2;
+    int r = Config["AIM::SIZE"];
+    return (x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r;
+}
+
 uintptr_t GetClosestTarget() {
     uintptr_t result = 0;
-
-    float MaxDist = std::numeric_limits<float>::infinity();
-
-    void *BaseWorld_Instance = 0;
-    Il2Cpp::GetStaticFieldValue("Assembly-CSharp.dll", "GameEngine", "BaseWorld", "Instance", &BaseWorld_Instance);
-    if (BaseWorld_Instance) {
-        auto m_Game = *(uintptr_t *) ((uintptr_t) BaseWorld_Instance + Fields["BaseWorld::m_Game"]);
-        if (m_Game) {
-            auto Gameplay_get_LocalPawn = (uintptr_t (*)()) (Methods["Gameplay::get_LocalPawn"]);
-            auto LocalPawn = Gameplay_get_LocalPawn();
-            if (LocalPawn) {
-                Vector3 MyPos{0, 0, 0};
-
-                auto local_m_Mesh = *(Transform **) (LocalPawn + Fields["Pawn::m_Mesh"]);
-                if (local_m_Mesh) {
-                    MyPos = local_m_Mesh->get_position();
-                }
-
-                auto EnemyPawns = *(List<uintptr_t> **) (m_Game + Fields["BaseGame::EnemyPawns"]);
-                if (EnemyPawns) {
-                    auto Items = EnemyPawns->getItems();
-                    if (Items) {
-                        for (int i = 0; i < EnemyPawns->getSize(); i++) {
-                            auto Pawn = Items[i];
-                            if (Pawn) {
-                                if (!*(bool *) (Pawn + Fields["Pawn::m_IsAlive"]))
-                                    continue;
-
-                                auto m_Mesh = *(Transform **) (Pawn + Fields["Pawn::m_Mesh"]);
-                                if (!m_Mesh)
-                                    continue;
-
-                                auto RootPos = m_Mesh->get_position();
-                                float Distance = Vector3::Distance(MyPos, RootPos);
-
-                                if (Distance < MaxDist) {
-                                    result = Pawn;
-                                    MaxDist = Distance;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    float maxDist = std::numeric_limits<float>::infinity();
+    auto localPawn = GetLocalPawn();
+    if (!localPawn) return 0;
+    auto myMesh = GetPawnMesh(localPawn);
+    if (!myMesh) return 0;
+    Vector3 myPos = myMesh->get_position();
+    auto enemies = GetEnemyPawns();
+    if (!enemies) return 0;
+    auto items = enemies->getItems();
+    if (!items) return 0;
+    for (int i = 0; i < enemies->getSize(); i++) {
+        auto pawn = items[i];
+        if (!pawn || !IsPawnAlive(pawn) || pawn == localPawn) continue;
+        auto mesh = GetPawnMesh(pawn);
+        if (!mesh) continue;
+        float dist = Vector3::Distance(myPos, mesh->get_position());
+        if (dist < maxDist) { result = pawn; maxDist = dist; }
     }
-
     return result;
 }
 
-bool isInsideFOV(int x, int y) {
-    if (!Config["AIM::SIZE"])
-        return true;
-
-    int circle_x = g_screenWidth / 2;
-    int circle_y = g_screenHeight / 2;
-    int rad = Config["AIM::SIZE"];
-    return (x - circle_x) * (x - circle_x) + (y - circle_y) * (y - circle_y) <= rad * rad;
-}
-
-uintptr_t GetInsideFOVTarget() {
+uintptr_t GetFOVTarget() {
     uintptr_t result = 0;
-
-    float MaxDist = std::numeric_limits<float>::infinity();
-
-    void *BaseWorld_Instance = 0;
-    Il2Cpp::GetStaticFieldValue("Assembly-CSharp.dll", "GameEngine", "BaseWorld", "Instance", &BaseWorld_Instance);
-    if (BaseWorld_Instance) {
-        auto m_Game = *(uintptr_t *) ((uintptr_t) BaseWorld_Instance + Fields["BaseWorld::m_Game"]);
-        if (m_Game) {
-            auto Gameplay_get_LocalPawn = (uintptr_t (*)()) (Methods["Gameplay::get_LocalPawn"]);
-            auto LocalPawn = Gameplay_get_LocalPawn();
-            if (LocalPawn) {
-                Vector3 MyPos{0, 0, 0};
-
-                auto local_m_Mesh = *(Transform **) (LocalPawn + Fields["Pawn::m_Mesh"]);
-                if (local_m_Mesh) {
-                    MyPos = local_m_Mesh->get_position();
-                }
-
-                auto EnemyPawns = *(List<uintptr_t> **) (m_Game + Fields["BaseGame::EnemyPawns"]);
-                if (EnemyPawns) {
-                    auto Items = EnemyPawns->getItems();
-                    if (Items) {
-                        for (int i = 0; i < EnemyPawns->getSize(); i++) {
-                            auto Pawn = Items[i];
-                            if (Pawn) {
-                                if (!*(bool *) (Pawn + Fields["Pawn::m_IsAlive"]))
-                                    continue;
-
-                                auto m_HeadBone = *(Transform **) (Pawn + Fields["Pawn::m_HeadBone"]);
-                                if (!m_HeadBone)
-                                    continue;
-
-                                auto HeadSc = WorldToScreen(m_HeadBone->get_position());
-
-                                Vector2 v2Middle = Vector2((float) (g_screenWidth / 2), (float) (g_screenHeight / 2));
-                                Vector2 v2Loc = Vector2(HeadSc.X, HeadSc.Y);
-
-                                if (isInsideFOV((int) HeadSc.X, (int) HeadSc.Y)) {
-                                    float Distance = Vector2::Distance(v2Middle, v2Loc);
-
-                                    if (Distance < MaxDist) {
-                                        result = Pawn;
-                                        MaxDist = Distance;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    float maxDist = std::numeric_limits<float>::infinity();
+    auto localPawn = GetLocalPawn();
+    if (!localPawn) return 0;
+    auto enemies = GetEnemyPawns();
+    if (!enemies) return 0;
+    auto items = enemies->getItems();
+    if (!items) return 0;
+    Vector2 center((float)(g_screenWidth / 2), (float)(g_screenHeight / 2));
+    for (int i = 0; i < enemies->getSize(); i++) {
+        auto pawn = items[i];
+        if (!pawn || !IsPawnAlive(pawn) || pawn == localPawn) continue;
+        auto head = GetPawnHeadBone(pawn);
+        if (!head) continue;
+        auto sc = WorldToScreen(head->get_position());
+        if (sc.Z <= 0) continue;
+        if (!isInsideFOV((int)sc.X, (int)sc.Y)) continue;
+        float dist = Vector2::Distance(center, Vector2(sc.X, sc.Y));
+        if (dist < maxDist) { result = pawn; maxDist = dist; }
     }
-
     return result;
 }
-// ================================================================================================================================ //
 
-// ================================================================================================================================ //
-void native_onCanvasDraw(JNIEnv *env, jobject obj, jobject canvas, int screenWidth, int screenHeight, float screenDensity) {
-    static Canvas *m_Canvas = 0;
-    if (!m_Canvas) {
-        LOGI("Canvas Object: %p | Width: %d | Height: %d | Density: %f", canvas, screenWidth, screenHeight, screenDensity);
-        m_Canvas = new Canvas(env, screenWidth, screenHeight, screenDensity);
+void DoAimbot(uintptr_t target) {
+    if (!target) return;
+    uintptr_t bonePtr = 0;
+    if (Config["AIM::HEAD"]) bonePtr = (uintptr_t)GetPawnHeadBone(target);
+    else bonePtr = (uintptr_t)GetPawnMesh(target);
+    if (!bonePtr) return;
+    Vector3 targetPos = ((Transform*)bonePtr)->get_position();
+    auto localPawn = GetLocalPawn();
+    if (!localPawn) return;
+    Quaternion rot = Quaternion::LookRotation(targetPos);
+    auto fn = (void(*)(uintptr_t, Quaternion))(METHOD(RVA_Pawn_SetAimRotation));
+    fn(localPawn, rot);
+}
+
+// ================================================================
+// ESP DRAW
+// ================================================================
+void DrawESP(Canvas* canvas) {
+    if (!canvas) return;
+    auto localPawn = GetLocalPawn();
+    if (!localPawn) return;
+    auto enemies = GetEnemyPawns();
+    if (!enemies) return;
+    auto items = enemies->getItems();
+    if (!items) return;
+
+    for (int i = 0; i < enemies->getSize(); i++) {
+        auto pawn = items[i];
+        if (!pawn || !IsPawnAlive(pawn) || pawn == localPawn) continue;
+
+        auto head = GetPawnHeadBone(pawn);
+        auto mesh = GetPawnMesh(pawn);
+        if (!head || !mesh) continue;
+
+        auto headSc = WorldToScreen(head->get_position());
+        auto rootSc = WorldToScreen(mesh->get_position());
+
+        if (headSc.Z <= 0 || rootSc.Z <= 0) continue;
+
+        float height = std::abs(rootSc.Y - headSc.Y);
+        float width = height * 0.4f;
+        float health = GetPawnHealth(pawn);
+        float maxHealth = GetPawnMaxHealth(pawn);
+        std::string name = GetPawnName(pawn);
+        float dist = headSc.Z;
+
+        // Box ESP
+        if (Config["ESP::BOX"]) {
+            canvas->drawRect(
+                headSc.X - width / 2,
+                headSc.Y,
+                headSc.X + width / 2,
+                rootSc.Y,
+                Color::Red, 1.5f
+            );
+        }
+
+        // Line ESP
+        if (Config["ESP::LINE"]) {
+            canvas->drawLine(
+                g_screenWidth / 2, g_screenHeight,
+                headSc.X, headSc.Y,
+                Color::Red, 1.5f
+            );
+        }
+
+        // Health Bar
+        if (Config["ESP::HEALTH"]) {
+            float ratio = health / (maxHealth > 0 ? maxHealth : 100);
+            Color hpColor = ratio > 0.5f ? Color::Green : ratio > 0.25f ? Color::Yellow : Color::Red;
+            canvas->drawRect(
+                headSc.X - width / 2 - 6,
+                headSc.Y + (height * (1.0f - ratio)),
+                headSc.X - width / 2 - 3,
+                rootSc.Y,
+                hpColor, 1.0f
+            );
+        }
+
+        // Name + Distance
+        if (Config["ESP::NAME"]) {
+            char info[128];
+            snprintf(info, sizeof(info), "%s [%.0fm]", name.c_str(), dist);
+            canvas->drawText(info, headSc.X, headSc.Y - 12, Color::White, 11.0f);
+        }
     }
+}
 
+// ================================================================
+// CANVAS DRAW CALLBACK
+// ================================================================
+void native_onCanvasDraw(JNIEnv* env, jobject obj, jobject canvas,
+                          int screenWidth, int screenHeight, float density) {
+    static Canvas* m_Canvas = nullptr;
+    if (!m_Canvas) {
+        m_Canvas = new Canvas(env, screenWidth, screenHeight, density);
+    }
     m_Canvas->UpdateCanvas(canvas);
-
     g_screenWidth = screenWidth;
     g_screenHeight = screenHeight;
-	
-    float lineSize = m_Canvas->scaleSize(0.8f);
-	
-    if (!bInitDone)
-        return;
 
-    auto Screen_SetResolution = (void (*)(void *, int, int, bool)) (Methods["Screen::SetResolution"]);
-    Screen_SetResolution(0, screenWidth, screenHeight, true);
+    if (!bInitDone || !g_il2cpp) return;
 
-    void *BaseWorld_Instance = 0;
-    Il2Cpp::GetStaticFieldValue("Assembly-CSharp.dll", "GameEngine", "BaseWorld", "Instance", &BaseWorld_Instance);
-    if (Tools::IsPtrValid(BaseWorld_Instance)) {
-        auto m_Game = *(uintptr_t *) ((uintptr_t) BaseWorld_Instance + Fields["BaseWorld::m_Game"]);
-        if (Tools::IsPtrValid((void *) m_Game)) {
-            auto Gameplay_get_LocalPawn = (uintptr_t (*)()) (Methods["Gameplay::get_LocalPawn"]);
-            auto LocalPawn = Gameplay_get_LocalPawn();
-              if (Tools::IsPtrValid((void *) LocalPawn)) {
-                if (Config["AIM::TARGET"] == 1) {
-                    m_Canvas->drawCircle(screenWidth / 2, screenHeight / 2, Config["AIM::SIZE"], 1.5f, false, ARGB(255, 0, 255, 0));
-                }
+    DrawESP(m_Canvas);
 
-                Vector3 MyPos{0, 0, 0};
-
-                auto local_m_Mesh = *(Transform **) (LocalPawn + Fields["Pawn::m_Mesh"]);
-                if (Tools::IsPtrValid(local_m_Mesh)) {
-                    MyPos = local_m_Mesh->get_position();
-                }
-
-                auto EnemyPawns = *(List<uintptr_t> **) (m_Game + Fields["BaseGame::EnemyPawns"]);
-                if (Tools::IsPtrValid(EnemyPawns)) {
-                    auto Items = EnemyPawns->getItems();
-                    if (Tools::IsPtrValid(Items)) {
-                        for (int i = 0; i < EnemyPawns->getSize(); i++) {
-                            auto Pawn = Items[i];
-                            if (Tools::IsPtrValid((void *) Pawn)) {
-                                auto m_PlayerInfo = *(uintptr_t *) (Pawn + Fields["Pawn::m_PlayerInfo"]);
-                                if (Tools::IsPtrValid((void *) m_PlayerInfo)) {
-                                    auto m_HeadBone = *(Transform **) (Pawn + Fields["Pawn::m_HeadBone"]);
-                                    if (!Tools::IsPtrValid(m_HeadBone))
-                                        continue;
-
-                                    auto m_Mesh = *(Transform **) (Pawn + Fields["Pawn::m_Mesh"]);
-                                    if (!m_Mesh)
-                                        continue;
-
-                                    auto HeadPos = m_HeadBone->get_position();
-                                    auto HeadSc = WorldToScreen(HeadPos);                                 
-                                    auto RootPos = m_Mesh->get_position();
-                                    auto RootSc = WorldToScreen(RootPos);
-
-                                    float Distance = Vector3::Distance(MyPos, RootPos);
-                                      if (HeadSc.Z > 0) {
-                                      if (Config["ESP::LINE"]) {
-                                        m_Canvas->drawLine(screenWidth / 2, 0, HeadSc.X, screenHeight - HeadSc.Y, lineSize, RED);
-                                       }					                                        
-                                        if (Config["ESP::BOX"]) {
-                                            float boxHeight = abs(HeadSc.Y - RootSc.Y);
-                                            float boxWidth = boxHeight * 0.65f;
-                                            Vector2 vBox = {HeadSc.X - (boxWidth / 2), HeadSc.Y};
-
-                                            m_Canvas->drawBorder(vBox.X, screenHeight - vBox.Y, boxWidth, boxHeight, 1.5f, RED);
-                                        }
-                                        if (Config["ESP::HEALTH"]) {
-                                            auto m_AttackableInfo = *(uintptr_t *) (Pawn + Fields["AttackableTarget::m_AttackableInfo"]);
-                                            if (m_AttackableInfo) {
-                                                int CurHP = (int) *(float *) (m_AttackableInfo + Fields["AttackableTargetInfo::m_Health"]);
-                                                int MaxHP = (int) *(float *) (m_AttackableInfo + Fields["AttackableTargetInfo::m_MaxHealth"]);
-
-                                                long Color = ARGB(155, std::min(((510 * (MaxHP - CurHP)) / MaxHP), 255), std::min(((510 * CurHP) / MaxHP), 255), 0);
-
-                                                auto AboveHead = HeadPos;
-                                                Vector3 AboveHeadSc = WorldToScreen(AboveHead);
-                                                if (AboveHeadSc.Z > 0) {
-                                                    auto mWidth = m_Canvas->scaleSize(35.f);
-                                                    auto mHeight = mWidth * 0.175f;
-
-                                                    AboveHeadSc.X -= (mWidth / 2);
-                                                    AboveHeadSc.Y += (mHeight * 2);
-
-                                                    m_Canvas->drawBox(AboveHeadSc.X, screenHeight - AboveHeadSc.Y, (CurHP * mWidth / MaxHP), mHeight, Color);
-                                                    m_Canvas->drawBorder(AboveHeadSc.X, screenHeight - AboveHeadSc.Y, mWidth, mHeight, 1.0f, BLACK);
-                                                }
-                                            }
-                                        }
-                                        if (Config["ESP::NAME"] || Config["ESP::DISTANCE"]) {
-                                            Vector3 BelowRoot = RootPos;
-                                            Vector3 BelowRootSc = WorldToScreen(BelowRoot);
-                                            if (BelowRootSc.Z > 0) {
-                                                std::wstring ws;
-
-                                                if (Config["ESP::NAME"]) {
-                                                    auto m_NickName = *(String **) (m_PlayerInfo + Fields["PlayerInfo::m_NickName"]);
-                                                    if (m_NickName) {
-                                                        ws += m_NickName->WCString();
-                                                    }
-
-                                                    if (Config["ESP::DISTANCE"]) {
-                                                        if (!ws.empty())
-                                                            ws += L" [";
-                                                        ws += std::to_wstring((int) Distance);
-                                                        ws += L"m]";
-                                                    }
-
-                                                    auto mText = m_Canvas->getTextBounds(ws.c_str(), 0, ws.size());
-                                                    m_Canvas->drawText(ws.c_str(), BelowRootSc.X, screenHeight - BelowRootSc.Y + mText->getHeight(), 7.5f, Align::CENTER,PINK, BLACK);
-													}                                        
-											}
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    if (Config["AIM::ON"]) {
+        uintptr_t target = Config["AIM::FOV"] ? GetFOVTarget() : GetClosestTarget();
+        if (target) DoAimbot(target);
     }
 }
-void *Main_Thread(void *) {
-    while (g_il2cpp) {
-        auto t1 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 
-        void *BaseWorld_Instance = 0;
-        Il2Cpp::GetStaticFieldValue("Assembly-CSharp.dll", "GameEngine", "BaseWorld", "Instance", &BaseWorld_Instance);
-        if (BaseWorld_Instance) {
-            auto m_Game = *(uintptr_t *) ((uintptr_t) BaseWorld_Instance + Fields["BaseWorld::m_Game"]);
-            if (m_Game) {
-                auto Gameplay_get_LocalPawn = (uintptr_t (*)()) (Methods["Gameplay::get_LocalPawn"]);
-                auto LocalPawn = Gameplay_get_LocalPawn();
-                if (LocalPawn) {
-                    if (Config["AIM::AIMBOT"]) {
-                        bool bTriggerReady = Config["AIM::TRIGGER"] == 0;
-                        if (Config["AIM::TRIGGER"] == 1) {
-                            auto Pawn_get_IsFiring = (bool (*)(uintptr_t)) (Methods["Pawn::get_IsFiring"]);
-                            bTriggerReady = Pawn_get_IsFiring(LocalPawn);
-                        } else if (Config["AIM::TRIGGER"] == 2) {
-                            auto Pawn_IsAiming = (bool (*)(uintptr_t)) (Methods["Pawn::IsAiming"]);
-                            bTriggerReady = Pawn_IsAiming(LocalPawn);
-                        }
-                        if (bTriggerReady) {
-                            uintptr_t Target = 0;
-                            if (Config["AIM::TARGET"] == 0) {
-                                Target = GetClosestTarget();
-                            }
-                            if (Config["AIM::TARGET"] == 1) {
-                                Target = GetInsideFOVTarget();
-                            }
-                            if (Target) {
-                                Vector3 targetPos;
-                                if (Config["AIM::LOCATION"] == 0) {
-                                   auto m_HeadBone = *(Transform **) (Target + Fields["Pawn::m_HeadBone"]);
-                                if (!m_HeadBone)
-                                    continue; 
-
-                                targetPos = m_HeadBone->get_position();
-                            }
-                                if (Config["AIM::LOCATION"] == 1) {
-                                   auto m_HeadBone = *(Transform **) (Target + Fields["Pawn::m_HeadBone"]);
-                                if (!m_HeadBone)
-                                    continue;
-
-                                targetPos = m_HeadBone->get_position();
-                                targetPos.Y -= 0.2f;
-                            }
-                                if (Config["AIM::LOCATION"] == 2) {
-                                   auto m_HeadBone = *(Transform **) (Target + Fields["Pawn::m_HeadBone"]);
-                                if (!m_HeadBone)
-                                    continue;
-
-                                targetPos = m_HeadBone->get_position();
-                                targetPos.Y -= 0.4f;
-                            }
-
-                                auto main = Camera::get_main();
-                                if (main) {
-                                    auto mainView = ((Component *) main)->get_transform();
-                                    if (mainView) {
-                                        auto Pawn_SetAimRotation = (void (*)(uintptr_t, Quaternion)) (Methods["Pawn::SetAimRotation"]);
-                                        Pawn_SetAimRotation(LocalPawn, Quaternion::LookRotation(targetPos - mainView->get_position(), Vector3::Up()));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        auto td = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() - t1;
-        std::this_thread::sleep_for(std::chrono::milliseconds(std::max(std::min(0LL, SLEEP_TIME - td), SLEEP_TIME)));
-    }
-    return 0;
-}
-// ================================================================================================================================ //
-
-void AutoAdjustResolution(uintptr_t thiz) {
-    return;
-}
-
-// ================================================================================================================================ //
-void *Init_Thread(void *) {
+// ================================================================
+// INIT THREAD
+// ================================================================
+void* Init_Thread(void*) {
+    // Wait for libunity.so to load
     while (!g_il2cpp) {
         g_il2cpp = Tools::GetBaseAddress("libunity.so");
         sleep(1);
     }
+    LOGI("libunity.so base: 0x%lx", g_il2cpp);
 
-    LOGI("libunity.so: %p", g_il2cpp);
-
-    Il2Cpp::Attach("libunity.so");
-
+    // Wait for game to fully init
     sleep(5);
 
-    Methods["Transform::get_position"] = (uintptr_t) Il2Cpp::GetMethodOffset("UnityEngine.dll", "UnityEngine", "Transform", "get_position");
-    
-    Methods["Camera::get_main"] = (uintptr_t) Il2Cpp::GetMethodOffset("UnityEngine.dll", "UnityEngine", "Camera", "get_main");
-    
-    Methods["Camera::WorldToScreenPoint"] = (uintptr_t) Il2Cpp::GetMethodOffset("UnityEngine.dll", "UnityEngine", "Camera", "WorldToScreenPoint", 1);
-    
-    Methods["Component::get_transform"] = (uintptr_t) Il2Cpp::GetMethodOffset("UnityEngine.dll", "UnityEngine", "Component", "get_transform");
-    
-   Methods["Screen::SetResolution"] = (uintptr_t) Il2Cpp::GetMethodOffset("UnityEngine.dll", "UnityEngine", "Screen", "SetResolution", 3);
-    
-    Methods["Gameplay::get_LocalPawn"] = (uintptr_t) Il2Cpp::GetMethodOffset("Assembly-CSharp.dll", "GameEngine", "GamePlay", "get_LocalPawn");
-
-    Fields["BaseWorld::m_Game"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameEngine", "BaseWorld", "m_Game");
-    Fields["BaseGame::AllPawns"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameBase", "BaseGame", "AllPawns");
-    Fields["BaseGame::EnemyPawns"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameBase", "BaseGame", "EnemyPawns");
-
-    Methods["Pawn::SetAimRotation"] = (uintptr_t) Il2Cpp::GetMethodOffset("Assembly-CSharp.dll", "GameBase", "Pawn", "SetAimRotation", 1);
-    Methods["Pawn::get_IsFiring"] = (uintptr_t) Il2Cpp::GetMethodOffset("Assembly-CSharp.dll", "GameBase", "Pawn", "get_IsFiring");
-    Methods["Pawn::IsAiming"] = (uintptr_t) Il2Cpp::GetMethodOffset("Assembly-CSharp.dll", "GameBase", "Pawn", "IsAiming");
-
-    Fields["Pawn::m_PlayerInfo"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameBase", "Pawn", "m_PlayerInfo");
-    Fields["Pawn::get_HeadBone"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameBase", "Pawn", "get_HeadBone");
-    Fields["Pawn::m_HeadBone"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameBase", "Pawn", "m_HeadBone");
-    Fields["Pawn::m_Mesh"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameBase", "Pawn", "m_Mesh");
-    Fields["Pawn::m_IsAlive"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameBase", "Pawn", "m_IsAlive");
-
-    Fields["AttackableTarget::m_AttackableInfo"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameEngine", "AttackableTarget", "m_AttackableInfo");
-    Fields["AttackableTargetInfo::m_Health"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameEngine", "AttackableTargetInfo", "m_Health");
-    Fields["AttackableTargetInfo::m_MaxHealth"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameEngine", "AttackableTargetInfo", "m_MaxHealth");
-
-    Fields["PlayerInfo::m_NickName"] = Il2Cpp::GetFieldOffset("Assembly-CSharp.dll", "GameEngine", "PlayerInfo", "m_NickName");
-
+    // Verify key methods are accessible
+    auto test_fn = (uintptr_t(*)())(METHOD(RVA_BRGamePlay_get_LocalPawn));
+    LOGI("get_LocalPawn ptr: %p", (void*)test_fn);
 
     bInitDone = true;
+    LOGI("CODM Mod initialized! Dump: 25/07/2026");
 
-    return 0;
+    // Game loop
+    while (true) {
+        sleep(1);
+    }
+    return nullptr;
 }
 
-void native_Init(JNIEnv *env, jclass clazz, jobject mContext) {
-    pthread_t t;
-    pthread_create(&t, 0, Init_Thread, 0);
-}
+// ================================================================
+// NATIVE INIT
+// ================================================================
+void native_Init(JNIEnv* env, jobject context) {
+    // Default configs
+    Config["ESP::BOX"]    = 1;
+    Config["ESP::LINE"]   = 1;
+    Config["ESP::HEALTH"] = 1;
+    Config["ESP::NAME"]   = 1;
+    Config["AIM::ON"]     = 0;
+    Config["AIM::FOV"]    = 1;
+    Config["AIM::SIZE"]   = 150;
+    Config["AIM::HEAD"]   = 1;
 
+    pthread_t thread;
+    pthread_create(&thread, nullptr, Init_Thread, nullptr);
+}

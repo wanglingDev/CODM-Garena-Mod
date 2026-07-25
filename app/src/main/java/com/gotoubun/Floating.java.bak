@@ -1,0 +1,828 @@
+package com.gotoubun;
+
+import android.annotation.SuppressLint;
+import android.app.Service;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.PixelFormat;
+import android.graphics.Point;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Build;
+import android.os.Handler;
+import android.os.IBinder;
+import android.os.Message;
+import android.util.Base64;
+import android.util.TypedValue;
+import android.view.Display;
+import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewConfiguration;
+import android.view.WindowManager;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.CompoundButton;
+import android.widget.HorizontalScrollView;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.RelativeLayout;
+import android.widget.ScrollView;
+import android.widget.SeekBar;
+import android.widget.Spinner;
+import android.widget.Switch;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.util.Map;
+import java.util.Random;
+
+public class Floating extends Service {
+
+    static {
+        System.loadLibrary("nino");
+    }
+
+    // ─── Window & Display ──────────────────────────────────────────────────────
+    WindowManager windowManager;
+    int screenWidth, screenHeight, type, screenDpi;
+    float density;
+
+    WindowManager.LayoutParams iconLayoutParams, mainLayoutParams;
+    RelativeLayout iconLayout;
+    LinearLayout mainLayout;
+    CanvasView canvasLayout;
+
+    ImageView iconImg;
+    TextView textTitle;
+
+    SharedPreferences configPrefs;
+
+    // ─── Tab System ────────────────────────────────────────────────────────────
+    // Tab 0 = Visual (ESP)
+    // Tab 1 = Weapon (Bullet Tracer + All Skin)
+    // Tab 2 = Aim
+    // Tab 3 = Settings
+    String[] listTab = new String[]{"Visual", "Weapon", "Aim", "Settings"};
+    LinearLayout[] pageLayouts = new LinearLayout[listTab.length];
+    int lastSelectedPage = 0;
+
+    String M_RAND_TITLE = "-";
+    long sleepTime = 4000 / 60;
+    boolean isMaximized = false;
+
+    int layoutWidth  = 100;
+    int layoutHeight = 200;
+    int iconSize     = 40;
+    int menuButtonSize = 30;
+    int tabWidth     = 150;
+    int tabHeight    = 50;
+
+    // ─── Native Methods ────────────────────────────────────────────────────────
+    private native void onSendConfig(String s, String v);
+    public static native void onCanvasDraw(Canvas canvas, int w, int h, float d);
+    static native void Switch(int i, boolean jboolean1);
+    native String Title();
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  SERVICE LIFECYCLE
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        configPrefs = getSharedPreferences("config", MODE_PRIVATE);
+
+        windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
+        Point screenSize = new Point();
+        Display display = windowManager.getDefaultDisplay();
+        display.getRealSize(screenSize);
+
+        screenWidth  = screenSize.x;
+        screenHeight = screenSize.y;
+        screenDpi    = getResources().getDisplayMetrics().densityDpi;
+        density      = getResources().getDisplayMetrics().density;
+
+        layoutWidth    = convertSizeToDp(400);
+        layoutHeight   = convertSizeToDp(225);
+        iconSize       = convertSizeToDp(40);
+        menuButtonSize = convertSizeToDp(30);
+        tabWidth       = convertSizeToDp(0);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            type = 2038;
+        } else {
+            type = 2002;
+        }
+
+        CreateIcon();
+        CreateLayout();
+        CreateCanvas();
+        mUpdateThread.start();
+        mUpdateCanvas.start();
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (mUpdateCanvas.isAlive())  mUpdateCanvas.interrupt();
+        if (mUpdateThread.isAlive())  mUpdateThread.interrupt();
+        if (iconLayout  != null)      windowManager.removeView(iconLayout);
+        if (mainLayout  != null)      windowManager.removeView(mainLayout);
+        if (canvasLayout != null)     windowManager.removeView(canvasLayout);
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        super.onStartCommand(intent, flags, startId);
+        return START_NOT_STICKY;
+    }
+
+    @Override
+    public IBinder onBind(Intent intent) { return null; }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  CANVAS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    void CreateCanvas() {
+        int LAYOUT_FLAG = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                : WindowManager.LayoutParams.TYPE_SYSTEM_OVERLAY;
+
+        WindowManager.LayoutParams canvasLayoutParams = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                0, getNavigationBarHeight(),
+                LAYOUT_FLAG,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                PixelFormat.RGBA_8888);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+            canvasLayoutParams.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+
+        canvasLayoutParams.gravity = Gravity.TOP | Gravity.START;
+        canvasLayoutParams.x = 0;
+        canvasLayoutParams.y = 0;
+
+        canvasLayout = new CanvasView(this);
+        windowManager.addView(canvasLayout, canvasLayoutParams);
+    }
+
+    private int getNavigationBarHeight() {
+        boolean hasMenuKey = ViewConfiguration.get(this).hasPermanentMenuKey();
+        int resourceId = getResources().getIdentifier("navigation_bar_height", "dimen", "android");
+        if (resourceId > 0 && !hasMenuKey)
+            return getResources().getDimensionPixelSize(resourceId);
+        return 0;
+    }
+
+    private class CanvasView extends View {
+        public CanvasView(Context context) { super(context); }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            try {
+                onCanvasDraw(canvas, screenWidth, screenHeight, density);
+            } catch (Exception ex) {
+                ex.printStackTrace();
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  CONFIG
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private void UpdateConfiguration(String s, Object v) {
+        try {
+            onSendConfig(s, v.toString());
+            SharedPreferences.Editor configEditor = configPrefs.edit();
+            configEditor.putString(s, v.toString());
+            configEditor.apply();
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  ICON
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @SuppressLint("ClickableViewAccessibility")
+    void CreateIcon() {
+        iconLayout = new RelativeLayout(this);
+        iconLayout.setLayoutParams(new RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        iconImg = new ImageView(this);
+        iconImg.setLayoutParams(new ViewGroup.LayoutParams(iconSize, iconSize));
+        iconLayout.addView(iconImg);
+
+        try {
+            String iconBase64 = "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";
+            byte[] iconData = Base64.decode(iconBase64, Base64.DEFAULT);
+            Bitmap bmp = BitmapFactory.decodeByteArray(iconData, 0, iconData.length);
+            iconImg.setImageBitmap(bmp);
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+
+        // Touch drag icon
+        iconLayout.setOnTouchListener(new View.OnTouchListener() {
+            float dX, dY;
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        dX = iconLayoutParams.x - event.getRawX();
+                        dY = iconLayoutParams.y - event.getRawY();
+                        break;
+                    case MotionEvent.ACTION_MOVE:
+                        iconLayoutParams.x = (int)(event.getRawX() + dX);
+                        iconLayoutParams.y = (int)(event.getRawY() + dY);
+                        windowManager.updateViewLayout(iconLayout, iconLayoutParams);
+                        break;
+                }
+                return false;
+            }
+        });
+
+        iconImg.setOnClickListener(v -> {
+            iconLayout.setVisibility(View.GONE);
+            mainLayout.setVisibility(View.VISIBLE);
+        });
+
+        iconLayoutParams = new WindowManager.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                type,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS,
+                PixelFormat.RGBA_8888);
+        iconLayoutParams.gravity = Gravity.START | Gravity.TOP;
+        iconLayoutParams.x = 0;
+        iconLayoutParams.y = 200;
+
+        windowManager.addView(iconLayout, iconLayoutParams);
+        iconLayout.setVisibility(View.GONE);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  MAIN LAYOUT
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @SuppressLint("ClickableViewAccessibility")
+    void CreateLayout() {
+        mainLayoutParams = new WindowManager.LayoutParams(
+                layoutWidth, layoutHeight,
+                type,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                        | WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS,
+                PixelFormat.RGBA_8888);
+        mainLayoutParams.x = 0;
+        mainLayoutParams.y = 0;
+        mainLayoutParams.gravity = Gravity.START | Gravity.TOP;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P)
+            mainLayoutParams.layoutInDisplayCutoutMode =
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+
+        // ── Root container ────────────────────────────────────────────────────
+        mainLayout = new LinearLayout(this);
+        mainLayout.setOrientation(LinearLayout.VERTICAL);
+        mainLayout.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+
+        GradientDrawable mainBg = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{
+                        Color.parseColor("#E5080810"),
+                        Color.parseColor("#E50A0518")
+                });
+        mainBg.setCornerRadius(18f);
+        mainBg.setStroke(1, Color.parseColor("#5500FFFF"));
+        mainLayout.setBackground(mainBg);
+
+        // ── Header ────────────────────────────────────────────────────────────
+        RelativeLayout headerLayout = new RelativeLayout(this);
+        headerLayout.setLayoutParams(new RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                menuButtonSize + convertSizeToDp(4)));
+        headerLayout.setClickable(true);
+        headerLayout.setFocusable(true);
+        headerLayout.setFocusableInTouchMode(true);
+        headerLayout.setPadding(10, 5, 10, 5);
+        headerLayout.setGravity(Gravity.CENTER_HORIZONTAL);
+
+        textTitle = new TextView(this);
+        textTitle.setLayoutParams(new RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT));
+        textTitle.setGravity(Gravity.CENTER);
+        textTitle.setTextSize(18);
+        textTitle.setText("GAERIS");
+        textTitle.setTypeface(Typeface.createFromAsset(getAssets(), "fonts/fox.ttf"));
+        textTitle.setTextColor(Color.parseColor("#00FFFF"));
+        textTitle.setShadowLayer(12f, 0, 0, Color.parseColor("#00FFFF"));
+
+        textTitle.setOnClickListener(v -> {
+            mainLayout.setVisibility(View.GONE);
+            iconLayout.setVisibility(View.VISIBLE);
+        });
+
+        // Drag main layout from header
+        View.OnTouchListener dragListener = new View.OnTouchListener() {
+            float dX, dY, pressX, pressY, newX, newY, maxX, maxY;
+            @Override
+            public boolean onTouch(View v, MotionEvent event) {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        dX = mainLayoutParams.x - event.getRawX();
+                        dY = mainLayoutParams.y - event.getRawY();
+                        pressX = event.getRawX();
+                        pressY = event.getRawY();
+                        break;
+                    case MotionEvent.ACTION_MOVE:
+                        newX = event.getRawX() + dX;
+                        newY = event.getRawY() + dY;
+                        maxX = screenWidth  - mainLayout.getWidth();
+                        maxY = screenHeight - mainLayout.getHeight();
+                        if (newX < 0) newX = 0;
+                        if (newX > maxX) newX = maxX;
+                        if (newY < 0) newY = 0;
+                        if (newY > maxY) newY = maxY;
+                        mainLayoutParams.x = (int) newX;
+                        mainLayoutParams.y = (int) newY;
+                        windowManager.updateViewLayout(mainLayout, mainLayoutParams);
+                        break;
+                }
+                return false;
+            }
+        };
+        headerLayout.setOnTouchListener(dragListener);
+        textTitle.setOnTouchListener(dragListener);
+
+        headerLayout.addView(textTitle);
+        mainLayout.addView(headerLayout);
+
+        // ── Tab bar ───────────────────────────────────────────────────────────
+        HorizontalScrollView tabScrollView = new HorizontalScrollView(this);
+        tabScrollView.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        tabScrollView.setBackgroundColor(Color.parseColor("#CC050510"));
+
+        LinearLayout tabLayout = new LinearLayout(this);
+        tabLayout.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        tabLayout.setOrientation(LinearLayout.HORIZONTAL);
+        tabScrollView.addView(tabLayout);
+        mainLayout.addView(tabScrollView);
+
+        // ── Pages + tab buttons ───────────────────────────────────────────────
+        final RelativeLayout[] tabButtons = new RelativeLayout[listTab.length];
+
+        for (int i = 0; i < listTab.length; i++) {
+            // Page layout
+            pageLayouts[i] = new LinearLayout(this);
+            pageLayouts[i].setLayoutParams(new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            pageLayouts[i].setOrientation(LinearLayout.VERTICAL);
+
+            ScrollView scrollView = new ScrollView(this);
+            scrollView.setLayoutParams(new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT));
+            scrollView.addView(pageLayouts[i]);
+
+            // Tab button
+            tabButtons[i] = new RelativeLayout(this);
+            tabButtons[i].setLayoutParams(new RelativeLayout.LayoutParams(tabWidth, tabHeight));
+
+            if (i != 0) {
+                tabButtons[i].setBackgroundColor(Color.parseColor("#1A00FFFF")); // inactive cyan
+                pageLayouts[i].setVisibility(View.GONE);
+                scrollView.setVisibility(View.GONE);
+            } else {
+                tabButtons[i].setBackgroundColor(Color.parseColor("#33FF00FF")); // active magenta
+                pageLayouts[i].setVisibility(View.VISIBLE);
+            }
+
+            TextView tabText = new TextView(this);
+            tabText.setLayoutParams(new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT));
+            tabText.setGravity(Gravity.CENTER);
+            tabText.setText(listTab[i]);
+            tabText.setTextSize(convertSizeToDp(10.f));
+            tabText.setTextColor(Color.parseColor("#00FFFF"));
+            tabText.setShadowLayer(6f, 0, 0, Color.parseColor("#00FFFF"));
+            tabButtons[i].addView(tabText);
+
+            final int curTab = i;
+            final ScrollView sv = scrollView;
+
+            tabButtons[i].setOnClickListener(v -> {
+                if (curTab != lastSelectedPage) {
+                    // Hide old
+                    tabButtons[lastSelectedPage].setBackgroundColor(Color.parseColor("#1A00FFFF"));
+                    pageLayouts[lastSelectedPage].setVisibility(View.GONE);
+
+                    // Show new
+                    tabButtons[curTab].setBackgroundColor(Color.parseColor("#33FF00FF"));
+                    pageLayouts[curTab].setVisibility(View.VISIBLE);
+
+                    // Reset all others
+                    for (int j = 0; j < tabButtons.length; j++) {
+                        if (j != curTab)
+                            tabButtons[j].setBackgroundColor(Color.parseColor("#1A00FFFF"));
+                    }
+                    lastSelectedPage = curTab;
+                }
+            });
+
+            tabLayout.addView(tabButtons[i]);
+            mainLayout.addView(scrollView);
+        }
+
+        windowManager.addView(mainLayout, mainLayoutParams);
+        AddFeatures();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  FEATURES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    void AddFeatures() {
+
+        // ════════════════════════════════════════════════
+        // TAB 0 — VISUAL (ESP)
+        // ════════════════════════════════════════════════
+        AddText(0, "[ ESP ]", 10, Typeface.BOLD, "#FF00FFFF");
+
+        AddSwitch(0, "ESP Line", false, (btn, isChecked) ->
+                UpdateConfiguration("ESP::LINE", isChecked ? 1 : 0));
+
+        AddSwitch(0, "ESP Box", false, (btn, isChecked) ->
+                UpdateConfiguration("ESP::BOX", isChecked ? 1 : 0));
+
+        AddSwitch(0, "ESP Health", false, (btn, isChecked) ->
+                UpdateConfiguration("ESP::HEALTH", isChecked ? 1 : 0));
+
+        AddSwitch(0, "ESP Name", false, (btn, isChecked) ->
+                UpdateConfiguration("ESP::NAME", isChecked ? 1 : 0));
+
+        AddSwitch(0, "ESP Distance", false, (btn, isChecked) ->
+                UpdateConfiguration("ESP::DISTANCE", isChecked ? 1 : 0));
+
+        // ════════════════════════════════════════════════
+        // TAB 1 — WEAPON
+        // ════════════════════════════════════════════════
+
+        // ── Bullet Tracer ─────────────────────────────
+        AddText(1, "[ Bullet Tracer ]", 10, Typeface.BOLD, "#FF00FFFF");
+
+        AddSwitch(1, "Bullet Tracer", false, (btn, isChecked) ->
+                UpdateConfiguration("TRACER::ENABLE", isChecked ? 1 : 0));
+
+        // Tracer color via seekbar (0=Cyan 1=Magenta 2=Red 3=Green 4=Rainbow)
+        // Class hook: TrailRendererEffect  RVA 0x6D1AB30
+        // TrailRenderer.set_startColor     RVA 0x4E8388C
+        // TrailRenderer.set_endColor       RVA 0x4E83950
+        AddText2(1, "Tracer Color  (0=Cyan 1=Magenta 2=Red 3=Green 4=Rainbow)", 5.f, Color.parseColor("#AAFFFFFF"));
+        AddSeekbar(1, "Tracer Color", 0, 4, 0, "", "", new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                UpdateConfiguration("TRACER::COLOR", p);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+
+        AddSeekbar(1, "Tracer Width", 1, 10, 2, "", "px", new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                UpdateConfiguration("TRACER::WIDTH", p);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+
+        // ── All Weapon Skin ───────────────────────────
+        AddText(1, "[ Weapon Skin ]", 10, Typeface.BOLD, "#FFFF00FF");
+
+        AddSwitch(1, "All Weapon Skin", false, (btn, isChecked) ->
+                UpdateConfiguration("SKIN::ALLWEAPON", isChecked ? 1 : 0));
+
+        // WeaponSkinHelper.DoChange        RVA 0xABC53FC
+        // C2SCSInventoryChgWeaponSkinReq   RVA 0x6BC9D90
+        // SetWeaponSkinResult              RVA 0x9384A4C
+        AddSeekbar(1, "Skin ID", 0, 9999, 0, "ID:", "", new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                UpdateConfiguration("SKIN::ID", p);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+
+        // ════════════════════════════════════════════════
+        // TAB 2 — AIM
+        // ════════════════════════════════════════════════
+        AddText(2, "[ Aim Bot ]", 10, Typeface.BOLD, "#FF00FFFF");
+
+        AddSwitch(2, "Aim Bot", false, (btn, isChecked) ->
+                UpdateConfiguration("AIM::AIMBOT", isChecked ? 1 : 0));
+
+        AddText2(2, "Aim Location", 5.f, Color.parseColor("#AAFFFFFF"));
+        AddRadioButton(2, new String[]{"Head", "Chest", "Body"}, 0,
+                (rg, id) -> UpdateConfiguration("AIM::LOCATION", id));
+
+        AddText2(2, "Target Priority", 5.f, Color.parseColor("#AAFFFFFF"));
+        AddRadioButton(2, new String[]{"Closest Distance", "Inside POV"}, 0,
+                (rg, id) -> UpdateConfiguration("AIM::TARGET", id));
+
+        AddSeekbar(2, "FOV Size", 0, 500, 0, "", "", new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                UpdateConfiguration("AIM::SIZE", p);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+
+        AddText2(2, "Trigger Mode", 5.f, Color.parseColor("#AAFFFFFF"));
+        AddRadioButton(2, new String[]{"None", "Shooting", "Scoping"}, 0,
+                (rg, id) -> UpdateConfiguration("AIM::TRIGGER", id));
+
+        // ════════════════════════════════════════════════
+        // TAB 3 — SETTINGS
+        // ════════════════════════════════════════════════
+        AddText(3, "[ Settings ]", 10, Typeface.BOLD, "#FF00FFFF");
+
+        AddSeekbar(3, "Menu Opacity", 1, 100, 100, "", "%", new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                mainLayout.setAlpha((float) p / 100.f);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) {}
+            @Override public void onStopTrackingTouch(SeekBar s) {}
+        });
+
+        AddSeekbar(3, "Icon Size", 50, 200, 100, "", "%", new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                ViewGroup.LayoutParams lp = iconImg.getLayoutParams();
+                lp.width  = (int)(iconSize * (p / 100.f));
+                lp.height = (int)(iconSize * (p / 100.f));
+                iconImg.setLayoutParams(lp);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { iconLayout.setVisibility(View.VISIBLE); }
+            @Override public void onStopTrackingTouch(SeekBar s)  { iconLayout.setVisibility(View.GONE); }
+        });
+
+        AddSeekbar(3, "Icon Opacity", 0, 100, 100, "", "%", new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar s, int p, boolean u) {
+                iconLayout.setAlpha((float) p / 100.f);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { iconLayout.setVisibility(View.VISIBLE); }
+            @Override public void onStopTrackingTouch(SeekBar s)  { iconLayout.setVisibility(View.GONE); }
+        });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  UI HELPERS
+    // ══════════════════════════════════════════════════════════════════════════
+
+    void AddText(Object data, String text, int size, int style, String colorHex) {
+        TextView tv = new TextView(this);
+        tv.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        tv.setPadding(15, 8, 15, 2);
+        tv.setText(text);
+        tv.setTextSize(convertSizeToDp(size));
+        tv.setTypeface(null, style);
+        tv.setTextColor(Color.parseColor(colorHex));
+        tv.setShadowLayer(4f, 0, 0, Color.parseColor(colorHex));
+
+        if (data instanceof Integer)        pageLayouts[(Integer) data].addView(tv);
+        else if (data instanceof ViewGroup) ((ViewGroup) data).addView(tv);
+    }
+
+    void AddText2(Object data, String text, float size, int color) {
+        TextView tv = new TextView(this);
+        tv.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        tv.setPadding(15, 4, 15, 2);
+        tv.setText(text);
+        tv.setTextSize(size);
+        tv.setTextColor(color);
+
+        if (data instanceof Integer)        pageLayouts[(Integer) data].addView(tv);
+        else if (data instanceof ViewGroup) ((ViewGroup) data).addView(tv);
+    }
+
+    void AddSwitch(Object data, String label, boolean defaultOn,
+                   CompoundButton.OnCheckedChangeListener listener) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.setPadding(15, 5, 15, 5);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView tv = new TextView(this);
+        tv.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        tv.setText(label);
+        tv.setTextSize(convertSizeToDp(9.f));
+        tv.setTextColor(Color.parseColor("#DDFFFFFF"));
+
+        Switch sw = new Switch(this);
+        sw.setChecked(defaultOn);
+        sw.setThumbTintList(ColorStateList.valueOf(Color.parseColor("#00FFFF")));
+        sw.setTrackTintList(ColorStateList.valueOf(Color.parseColor("#44FF00FF")));
+        sw.setOnCheckedChangeListener(listener);
+
+        row.addView(tv);
+        row.addView(sw);
+
+        if (data instanceof Integer)        pageLayouts[(Integer) data].addView(row);
+        else if (data instanceof ViewGroup) ((ViewGroup) data).addView(row);
+    }
+
+    void AddSeekbar(Object data, String label, int min, int max, int defaultVal,
+                    String prefix, String suffix,
+                    SeekBar.OnSeekBarChangeListener listener) {
+        LinearLayout labelRow = new LinearLayout(this);
+        labelRow.setOrientation(LinearLayout.HORIZONTAL);
+        labelRow.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        labelRow.setPadding(15, 4, 15, 0);
+
+        TextView labelTv = new TextView(this);
+        labelTv.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        labelTv.setText(label);
+        labelTv.setTextSize(convertSizeToDp(8.f));
+        labelTv.setTextColor(Color.parseColor("#DDFFFFFF"));
+
+        TextView valueTv = new TextView(this);
+        valueTv.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        valueTv.setTextSize(convertSizeToDp(8.f));
+        valueTv.setTextColor(Color.parseColor("#00FFFF"));
+
+        labelRow.addView(labelTv);
+        labelRow.addView(valueTv);
+
+        SeekBar seekBar = new SeekBar(this);
+        seekBar.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        seekBar.setPadding(15, 0, 15, 5);
+        seekBar.setMax(max - min);
+        seekBar.setProgress(defaultVal - min);
+        seekBar.setProgressTintList(ColorStateList.valueOf(Color.parseColor("#00FFFF")));
+        seekBar.setThumbTintList(ColorStateList.valueOf(Color.parseColor("#FF00FF")));
+
+        valueTv.setText(prefix + defaultVal + suffix);
+
+        seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
+                int value = progress + min;
+                valueTv.setText(prefix + value + suffix);
+                listener.onProgressChanged(s, value, fromUser);
+            }
+            @Override public void onStartTrackingTouch(SeekBar s) { listener.onStartTrackingTouch(s); }
+            @Override public void onStopTrackingTouch(SeekBar s)  { listener.onStopTrackingTouch(s); }
+        });
+
+        if (data instanceof Integer) {
+            pageLayouts[(Integer) data].addView(labelRow);
+            pageLayouts[(Integer) data].addView(seekBar);
+        } else if (data instanceof ViewGroup) {
+            ((ViewGroup) data).addView(labelRow);
+            ((ViewGroup) data).addView(seekBar);
+        }
+    }
+
+    void AddRadioButton(Object data, String[] list, int defaultCheckedId,
+                        RadioGroup.OnCheckedChangeListener listener) {
+        RadioGroup rg = new RadioGroup(this);
+        rg.setOrientation(RadioGroup.HORIZONTAL);
+        rg.setLayoutParams(new RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        rg.setPadding(15, 4, 15, 4);
+
+        for (int i = 0; i < list.length; i++) {
+            RadioButton rb = new RadioButton(this);
+            rb.setPadding(8, 8, 8, 8);
+            rb.setText(list[i]);
+            rb.setTextSize(convertSizeToDp(7.f));
+            rb.setId(i);
+            rb.setTextColor(Color.parseColor("#DDFFFFFF"));
+            rb.setButtonTintList(ColorStateList.valueOf(Color.parseColor("#00FFFF")));
+            if (i == defaultCheckedId) rb.setChecked(true);
+            rg.addView(rb);
+        }
+        rg.setOnCheckedChangeListener(listener);
+
+        if (data instanceof Integer)        pageLayouts[(Integer) data].addView(rg);
+        else if (data instanceof ViewGroup) ((ViewGroup) data).addView(rg);
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  UTIL
+    // ══════════════════════════════════════════════════════════════════════════
+
+    float convertSizeToDp(float size) {
+        return TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
+                size, getResources().getDisplayMetrics());
+    }
+
+    int convertSizeToDp(int size) {
+        return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP,
+                size, getResources().getDisplayMetrics()));
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    //  THREADS & HANDLER
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @SuppressLint("HandlerLeak")
+    Handler handler = new Handler() {
+        @Override
+        public void handleMessage(Message msg) {
+            super.handleMessage(msg);
+            if (msg.what == 0) {
+                try {
+                    Point sz = new Point();
+                    windowManager.getDefaultDisplay().getRealSize(sz);
+                    screenWidth  = sz.x;
+                    screenHeight = sz.y;
+                    // canvasLayout layout update (no-op if params null)
+                } catch (Exception ex) { ex.printStackTrace(); }
+            }
+            if (msg.what == 1) {
+                try {
+                    Random r = new Random();
+                    String myTitle = "GAERIS";
+                    int idx = r.nextInt(myTitle.length());
+                    int c   = r.nextInt(M_RAND_TITLE.length());
+                    char[] arr = myTitle.toCharArray();
+                    arr[idx] = M_RAND_TITLE.charAt(c);
+                    textTitle.setText(String.valueOf(arr));
+                } catch (Exception ex) { ex.printStackTrace(); }
+            }
+        }
+    };
+
+    Thread mUpdateCanvas = new Thread() {
+        @Override
+        public void run() {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);
+            while (isAlive() && !isInterrupted()) {
+                try {
+                    long t1 = System.currentTimeMillis();
+                    canvasLayout.postInvalidate();
+                    long td = System.currentTimeMillis() - t1;
+                    Thread.sleep(Math.max(0, sleepTime - td));
+                } catch (Exception ex) { ex.printStackTrace(); }
+            }
+        }
+    };
+
+    Thread mUpdateThread = new Thread() {
+        @Override
+        public void run() {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY);
+            while (isAlive() && !isInterrupted()) {
+                try {
+                    long t1 = System.currentTimeMillis();
+                    Point sz = new Point();
+                    windowManager.getDefaultDisplay().getRealSize(sz);
+                    if (screenWidth != sz.x || screenHeight != sz.y)
+                        handler.sendEmptyMessage(0);
+                    handler.sendEmptyMessage(1);
+                    long td = System.currentTimeMillis() - t1;
+                    Thread.sleep(Math.max(0, sleepTime - td));
+                } catch (Exception ex) { ex.printStackTrace(); }
+            }
+        }
+    };
+}
