@@ -502,10 +502,29 @@ public class Floating extends Service {
         textTitle.setTextColor(Color.parseColor(getThemeHex(0)));
         textTitle.setShadowLayer(12f, 0, 0, Color.parseColor(getThemeHex(0)));
 
-        textTitle.setOnClickListener(v -> {
+        // ── Close / toggle button (✕) ────────────────────────────────────────
+        // Dedicated close button anchored to the right of the header.
+        // This replaces the broken textTitle.setOnClickListener approach —
+        // the drag touch listener was consuming taps on the title before the
+        // click event could fire, so the menu closed but the icon never
+        // became visible (both disappeared).
+        TextView closeBtn = new TextView(this);
+        RelativeLayout.LayoutParams closeLp = new RelativeLayout.LayoutParams(
+                menuButtonSize + convertSizeToDp(6),
+                menuButtonSize + convertSizeToDp(4));
+        closeLp.addRule(RelativeLayout.ALIGN_PARENT_END);
+        closeLp.addRule(RelativeLayout.CENTER_VERTICAL);
+        closeBtn.setLayoutParams(closeLp);
+        closeBtn.setGravity(Gravity.CENTER);
+        closeBtn.setText("✕");
+        closeBtn.setTextSize(convertSizeToDp(10f));
+        closeBtn.setTextColor(Color.parseColor(getThemeHex(0)));
+        closeBtn.setShadowLayer(8f, 0, 0, Color.parseColor(getThemeHex(0)));
+        closeBtn.setOnClickListener(v -> {
             mainLayout.setVisibility(View.GONE);
             iconLayout.setVisibility(View.VISIBLE);
         });
+        headerLayout.addView(closeBtn);
 
         View.OnTouchListener dragListener = new View.OnTouchListener() {
             float dX, dY, pressX, pressY, newX, newY, maxX, maxY;

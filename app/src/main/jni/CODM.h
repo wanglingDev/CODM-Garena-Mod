@@ -25,6 +25,7 @@
 #include <sys/mman.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include "Il2CppType.h"
 
 // ─── Logging ────────────────────────────────────────────────────────────────
 #define TAG  "GAERIS"
@@ -58,37 +59,35 @@ static uintptr_t g_il2cpp = 0;   // set once in JNI_OnLoad or hack_thread init
 inline uintptr_t getRVA(uintptr_t rva) { return g_il2cpp + rva; }
 
 // ─── IL2CPP types ────────────────────────────────────────────────────────────
-struct Il2CppObject { void* klass; void* monitor; };
-
-struct Il2CppString {
-    Il2CppObject object;
-    int32_t      length;     // character count (UTF-16 code units)
-    uint16_t     chars[1];   // variable-length UTF-16 array
-};
+// Il2CppObject and Il2CppString are defined in Il2CppType.h (included via
+// Il2Cpp.h).  Redefining them here caused redefinition errors and an
+// incompatible Il2CppString layout (chars[1] vs. start_char).  Removed.
 
 /**
  * Convert an Il2CppString* to a std::string (UTF-8).
- * Handles null pointer gracefully.
- *
- * FIX: old code called Il2CppString::ToString() which does not exist
- * in the runtime headers.  IL2CPP strings are plain structs; access
- * their chars[] field directly.
+ * Uses the real Il2CppString layout from Il2CppType.h:
+ *   int32_t  length     — UTF-16 code-unit count
+ *   uint16_t start_char — first element of the inline UTF-16 buffer
+ *   getChars()          — returns char* pointing at start_char
  */
 static std::string il2cpp_string_to_utf8(Il2CppString* s) {
     if (!s || s->length <= 0) return "";
+    // getChars() gives us a char* alias over the UTF-16 buffer starting at
+    // start_char; cast to uint16_t* to walk individual code units.
+    const uint16_t* chars = reinterpret_cast<const uint16_t*>(s->getChars());
     std::string out;
-    out.reserve(s->length);
-    for (int i = 0; i < s->length; ++i) {
-        uint16_t c = s->chars[i];
+    out.reserve(static_cast<size_t>(s->length));
+    for (int32_t i = 0; i < s->length; ++i) {
+        uint16_t c = chars[i];
         if (c < 0x80) {
-            out += (char)c;
+            out += static_cast<char>(c);
         } else if (c < 0x800) {
-            out += (char)(0xC0 | (c >> 6));
-            out += (char)(0x80 | (c & 0x3F));
+            out += static_cast<char>(0xC0 | (c >> 6));
+            out += static_cast<char>(0x80 | (c & 0x3F));
         } else {
-            out += (char)(0xE0 | (c >> 12));
-            out += (char)(0x80 | ((c >> 6) & 0x3F));
-            out += (char)(0x80 | (c & 0x3F));
+            out += static_cast<char>(0xE0 | (c >> 12));
+            out += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (c & 0x3F));
         }
     }
     return out;
@@ -322,18 +321,24 @@ inline float WeaponIni_getRecoilLateralModifier(void* ini) {
     return pfn(ini);
 }
 
-// ─── Weapon  (direct-field recoil patch) ─────────────────────────────────────
+// ─── Weapon  ─────────────────────────────────────────────────────────────────
 // TypeDefIndex 15920
-//   m_fireSpeed       float  offset 0x220
-//   m_RecoilUpBase    float  offset 0x70C
-//   m_RecoilLateralBase float offset 0x718
-//   m_RecoilUpMax     float  offset 0x714
+//   m_fireSpeed  float  offset 0x220  (confirmed dump.cs)
+//
+// NOTE: The old CODM.h tried to zero recoil by writing to offsets 0x70C/0x714/0x718
+// but dump.cs confirms those are m_BRBagHangPointOffsetPos_R / AngleR (Vector3 bag
+// animation data) — writing zeros there corrupts weapon animations, not recoil.
+//
+// Recoil in CODM lives entirely in WeaponIni. Zero it by hooking the getters:
+//
+//   static float hook_RecoilZero(void*) { return 0.f; }
+//   Tools::Hook((void*)getRVA(0x96239E8), (void*)hook_RecoilZero, nullptr); // UpBase
+//   Tools::Hook((void*)getRVA(0x9623AD0), (void*)hook_RecoilZero, nullptr); // LateralBase
+//   Tools::Hook((void*)getRVA(0x96236CC), (void*)hook_RecoilZero, nullptr); // UpMax
+//   Tools::Hook((void*)getRVA(0x9623740), (void*)hook_RecoilZero, nullptr); // LateralMax
+//
+// Place these hook calls inside native_Init (in Main.cpp) after g_il2cpp is set.
 
-inline void Weapon_noRecoil(void* weapon) {
-    *(float*)((uint8_t*)weapon + 0x70C) = 0.f;  // m_RecoilUpBase
-    *(float*)((uint8_t*)weapon + 0x718) = 0.f;  // m_RecoilLateralBase
-    *(float*)((uint8_t*)weapon + 0x714) = 0.f;  // m_RecoilUpMax
-}
 inline void Weapon_setFireSpeed(void* weapon, float mult) {
     float base = *(float*)((uint8_t*)weapon + 0x220);
     *(float*)((uint8_t*)weapon + 0x220) = base * mult;
@@ -355,22 +360,24 @@ inline void Trail_setEndColor(void* trail, Color c) {
 }
 
 // ─── WeaponSkinHelper ────────────────────────────────────────────────────────
-// DoChange    RVA 0xABC53FC
-// DoChange3P  RVA 0xABC5A54
-// SetWeaponSkinResult RVA 0x9384A4C
-// C2SCSInventoryChgWeaponSkinReq   RVA 0x6BC9D90
-//   weapon_id       offset 0x1C
-//   weapon_skin_id  offset 0x20
-//   weapon_guid     offset 0x24
+// TypeDefIndex 22797  (static class, confirmed dump.cs)
+//   DoChange    RVA 0xABC53FC  sig: static void DoChange(int weaponID, uint skinID, ManagedAsset* RootMeshAsset, bool is1P)
+//   DoChange3P  RVA 0xABC5A54  sig: static Texture* DoChange3P(int weaponID, uint skinID, ManagedAsset* RootMeshAsset, Texture* tex, Pawn* pawn)
+//
+// NOTE: Old wrappers used an instance-method signature (helper, weapon, skinID).
+// dump.cs confirms both are static methods; ManagedAsset and Texture are opaque
+// pointers from this side — pass nullptr if you don't have them (UI-less skin swap).
 
-typedef void (*fn_DoChange)(void* helper, void* weapon, int skinID);
-inline void WeaponSkin_doChange(void* helper, void* weapon, int skinID) {
-    static fn_DoChange pfn = (fn_DoChange)getRVA(0xABC53FC);
-    pfn(helper, weapon, skinID);
+typedef void  (*fn_WeaponSkin_DoChange)  (int weaponID, uint32_t skinID, void* rootMeshAsset, bool is1P);
+typedef void* (*fn_WeaponSkin_DoChange3P)(int weaponID, uint32_t skinID, void* rootMeshAsset, void* tex, void* pawn);
+
+inline void WeaponSkin_doChange(int weaponID, uint32_t skinID, void* rootMeshAsset = nullptr, bool is1P = true) {
+    static fn_WeaponSkin_DoChange pfn = (fn_WeaponSkin_DoChange)getRVA(0xABC53FC);
+    pfn(weaponID, skinID, rootMeshAsset, is1P);
 }
-inline void WeaponSkin_doChange3P(void* helper, void* weapon, int skinID) {
-    static fn_DoChange pfn = (fn_DoChange)getRVA(0xABC5A54);
-    pfn(helper, weapon, skinID);
+inline void* WeaponSkin_doChange3P(int weaponID, uint32_t skinID, void* rootMeshAsset = nullptr, void* tex = nullptr, void* pawn = nullptr) {
+    static fn_WeaponSkin_DoChange3P pfn = (fn_WeaponSkin_DoChange3P)getRVA(0xABC5A54);
+    return pfn(weaponID, skinID, rootMeshAsset, tex, pawn);
 }
 
 // ─── Memory utilities ────────────────────────────────────────────────────────
